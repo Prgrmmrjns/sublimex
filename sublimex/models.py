@@ -1,4 +1,17 @@
-"""ML model wrappers for SublimeX."""
+"""ML model wrappers for SublimeX.
+
+To use a custom model with SublimeX, your object must implement:
+
+  - evaluate(X_train, y_train, X_val, y_val, metric) -> float
+    Train on (X_train, y_train), predict on X_val, return the metric value.
+  - test(X_train, y_train, X_test, y_test, metric) -> float
+    Train on full train set, evaluate on test set (used for final evaluation).
+  - predict(X) -> array (and optionally predict_proba(X) for classification)
+    Used after test() to obtain predictions from the fitted model.
+
+metric is one of 'auc', 'accuracy', 'rmse'. For 'auc', classifiers should
+return predict_proba in evaluate/test so that AUC can be computed.
+"""
 import numpy as np
 from sklearn.metrics import roc_auc_score, accuracy_score, mean_squared_error
 

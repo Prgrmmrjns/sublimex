@@ -1,9 +1,19 @@
-"""SublimeX core module - interpretable feature extraction."""
+"""SublimeX core module - interpretable feature extraction.
+
+Algorithm (high level):
+  1. Stack input channels into array (n_samples, n_channels, n_time).
+  2. Apply each registered transform to get multiple views (e.g. raw, zscore, fft_power).
+  3. Repeat until no improvement (or max_features reached):
+     a. Run Bayesian optimization (Optuna) to choose segment (channel, transform, center, range)
+        and optional aggregation so that a single new feature improves validation metric.
+     b. Append the new feature to the current feature matrix and record its parameters.
+  4. transform() applies the same segment+aggregation for each saved feature to new data.
+"""
 import numpy as np
 import json
 import os
 import warnings
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 
 import optuna
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
@@ -34,22 +44,57 @@ class MockTrial:
 
 
 class SublimeX:
-    """SublimeX: Supervised Bottom-Up Localized Multi-Representative Feature Extraction."""
-    
-    def __init__(self, metric='auc', n_trials=300, inner_cv=1, val_size=0.5,
-                 verbose=False, show_progress_bar=False, transforms=None,
+    """Supervised Bottom-Up Localized Multi-Representative Feature eXtraction.
+
+    Discovers a minimal set of interpretable features from multi-channel time series
+    by optimizing segment (channel, transform, time window) and aggregation for each
+    feature so that downstream metric (e.g. AUC) improves.
+
+    Parameters
+    ----------
+    metric : str
+        Downstream metric to optimize: 'auc', 'accuracy', or 'rmse'.
+    n_trials : int
+        Number of Optuna trials per feature (higher = better search, slower).
+    max_features : int or None
+        Maximum number of features to discover. None = stop only when no improvement.
+    inner_cv : int
+        Internal CV folds for evaluating a candidate feature (1 = single train/val split).
+    val_size : float
+        Validation fraction when inner_cv=1 (e.g. 0.5 = 50% validation).
+    random_state : int or None
+        Seed for CV splits and Optuna. None = non-reproducible.
+    verbose : bool
+        Print progress (e.g. each discovered feature).
+    show_progress_bar : bool
+        Show Optuna progress bar per feature.
+    transforms : dict or None
+        Map transform_name -> callable(shape (..., n_time)) -> same shape. None = use built-in.
+    objective_fn : callable or None
+        (trial, ctx) -> float. None = default mean-over-segment objective.
+    model : object or None
+        Must implement evaluate(X_train, y_train, X_val, y_val, metric) -> float and
+        test(...). None = LightGBM classifier/regressor.
+    sampler : str
+        Optuna sampler: 'tpe' or 'nsga2'.
+    """
+
+    def __init__(self, metric='auc', n_trials=300, max_features=None, inner_cv=1, val_size=0.5,
+                 random_state=None, verbose=False, show_progress_bar=False, transforms=None,
                  objective_fn=None, model=None, sampler='tpe'):
         self.metric = metric
         self.n_trials = n_trials
+        self.max_features = max_features
         self.inner_cv = inner_cv
         self.val_size = val_size
+        self.random_state = random_state
         self.verbose = verbose
         self.show_progress_bar = show_progress_bar
         self.transforms = transforms or TRANSFORMS
         self.objective_fn = objective_fn or default_objective
         self.model = model
         self.sampler = sampler
-        
+
         self.extracted_features: List[Dict[str, Any]] = []
         self.transform_names: List[str] = list(self.transforms.keys())
         self.n_channels: Optional[int] = None
@@ -74,26 +119,42 @@ class SublimeX:
     
     def _create_cv_splits(self, n_samples, y):
         """Create CV splits for internal evaluation."""
+        rng = self.random_state
         if self.inner_cv == 1:
             stratify = y if self.metric != 'rmse' else None
             train_idx, val_idx = train_test_split(
-                np.arange(n_samples), test_size=self.val_size, 
-                random_state=42, stratify=stratify)
+                np.arange(n_samples), test_size=self.val_size,
+                random_state=rng, stratify=stratify)
             return [(train_idx, val_idx)]
         cv_cls = StratifiedKFold if self.metric != 'rmse' else KFold
-        return list(cv_cls(self.inner_cv, shuffle=True, random_state=42).split(np.zeros(n_samples), y))
+        return list(cv_cls(self.inner_cv, shuffle=True, random_state=rng).split(np.zeros(n_samples), y))
     
     def _create_sampler(self):
         """Create Optuna sampler."""
         if self.sampler == 'nsga2':
-            return optuna.samplers.NSGAIISampler()
-        return optuna.samplers.TPESampler(multivariate=True, group=True, constant_liar=True)
+            return optuna.samplers.NSGAIISampler(seed=self.random_state)
+        return optuna.samplers.TPESampler(
+            seed=self.random_state, multivariate=True, group=True, constant_liar=True
+        )
     
-    def fit(self, input_series, y):
-        """Fit the feature extractor to training data."""
+    def fit(self, input_series, y, initial_X=None):
+        """Fit the feature extractor to training data.
+
+        Parameters
+        ----------
+        input_series : list of array-like
+            One array per channel, each (n_samples, n_time).
+        y : array-like
+            Target values.
+        initial_X : array-like or None
+            If provided, shape (n_samples, n_initial). These features are always
+            included when evaluating each candidate (so the first SublimeX feature
+            is scored together with initial_X, not alone). Use for static/baseline
+            features that should be part of the downstream model.
+        """
         data = np.stack(list(input_series), axis=1).astype(np.float32)
         n_samples, self.n_channels, self.n_time = data.shape
-        
+
         if self.verbose:
             print(f"\nSublimeX Feature Extraction")
             print(f"  Samples: {n_samples}")
@@ -101,71 +162,101 @@ class SublimeX:
             print(f"  Time points: {self.n_time}")
             print(f"  Transforms: {self.transform_names}")
             print(f"  Metric: {self.metric}\n")
-        
+
         if self.model is None:
             task = 'regression' if self.metric == 'rmse' else 'classification'
             self.model = LightGBMModel(task=task)
-        
+
         cv_splits = self._create_cv_splits(n_samples, y)
         transformed = self._apply_transforms(data)
-        
+
         direction = 'minimize' if self.metric == 'rmse' else 'maximize'
         is_maximize = direction == 'maximize'
-        
+
         ctx = {
             'transformed': transformed, 'y': y, 'model': self.model,
             'metric': self.metric, 'n_channels': self.n_channels,
             'n_time': self.n_time, 'transform_names': self.transform_names,
             'cv_splits': cv_splits,
         }
-        
+
         self.extracted_features = []
-        current_X = np.empty((n_samples, 0), dtype=np.float32)
+        if initial_X is not None:
+            initial_X = np.asarray(initial_X, dtype=np.float32)
+            if initial_X.ndim == 1:
+                initial_X = initial_X.reshape(-1, 1)
+            current_X = initial_X.copy()
+        else:
+            current_X = np.empty((n_samples, 0), dtype=np.float32)
         best_score = float('inf') if not is_maximize else -float('inf')
         while True:
+            if self.max_features is not None and len(self.extracted_features) >= self.max_features:
+                if self.verbose:
+                    print(f"  Reached max_features={self.max_features}")
+                break
             ctx['current_X'] = current_X
-            
+
             study = optuna.create_study(direction=direction, sampler=self._create_sampler())
-            study.optimize(lambda t: self.objective_fn(t, ctx), n_trials=self.n_trials,
-                          show_progress_bar=self.show_progress_bar, n_jobs=-1)
-            
-            improved = (is_maximize and study.best_value > best_score) or \
-                       (not is_maximize and study.best_value < best_score)
-            
+            study.optimize(
+                lambda t: self.objective_fn(t, ctx),
+                n_trials=self.n_trials,
+                show_progress_bar=self.show_progress_bar,
+                n_jobs=-1,
+            )
+
+            improved = (is_maximize and study.best_value > best_score) or (
+                not is_maximize and study.best_value < best_score
+            )
+
             if not improved:
                 break
-            
+
             best_score = study.best_value
             params = study.best_params
             self.extracted_features.append(params)
-            
+
             feat = self._extract_feature(params, ctx)
             current_X = np.hstack([current_X, feat]) if current_X.size else feat
-            
+
             if self.verbose:
                 print(f"  Feature {len(self.extracted_features)}: {self.metric}={best_score:.5f}, params={params}")
-        
+
         self._is_fitted = True
         if self.verbose:
             print(f"\nDiscovered {len(self.extracted_features)} features")
         return self
     
-    def transform(self, input_series):
-        """Transform data using extracted features."""
-        
+    def transform(self, input_series, initial_X=None):
+        """Transform data using extracted features.
+
+        Parameters
+        ----------
+        input_series : list of array-like
+            One array per channel, each (n_samples, n_time).
+        initial_X : array-like or None
+            If provided, shape (n_samples, n_initial). Prepended to the SublimeX
+            features so that output is [initial_X | SublimeX features]. Pass the
+            same kind of initial features used in fit() for the corresponding samples.
+        """
         data = np.stack(list(input_series), axis=1).astype(np.float32)
         n_samples, n_channels, n_time = data.shape
         transformed = self._apply_transforms(data)
-        
-        ctx = {'transformed': transformed, 'n_time': n_time, 
+
+        ctx = {'transformed': transformed, 'n_time': n_time,
                'n_channels': n_channels, 'transform_names': self.transform_names}
-        
+
         features = [self._extract_feature(p, ctx) for p in self.extracted_features]
-        return np.hstack(features).astype(np.float32)
-    
-    def fit_transform(self, input_series, y):
+        sx = np.hstack(features).astype(np.float32)
+        if initial_X is not None:
+            initial_X = np.asarray(initial_X, dtype=np.float32)
+            if initial_X.ndim == 1:
+                initial_X = initial_X.reshape(-1, 1)
+            return np.hstack([initial_X, sx])
+        return sx
+
+    def fit_transform(self, input_series, y, initial_X=None):
         """Fit and transform in one step."""
-        return self.fit(input_series, y).transform(input_series)
+        return self.fit(input_series, y, initial_X=initial_X).transform(input_series, initial_X=initial_X)
     
     def save_features(self, path):
         """Save extracted feature parameters to JSON file."""
@@ -218,4 +309,7 @@ class SublimeX:
     
     def __repr__(self):
         status = "fitted" if self._is_fitted else "not fitted"
-        return f"SublimeX(metric='{self.metric}', n_trials={self.n_trials}, status={status}, n_features={len(self.extracted_features)})"
+        return (
+            f"SublimeX(metric='{self.metric}', n_trials={self.n_trials}, "
+            f"status={status}, n_features={len(self.extracted_features)})"
+        )

@@ -63,7 +63,9 @@ def plot_feature_distributions(features, y, feature_idx=0, feature_description=N
     plt = _import_plt()
     feat_values = features[:, feature_idx]
     classes = np.unique(y)
-    colors = plt.cm.get_cmap('tab10')(range(len(classes)))
+    # Use plt.cm.tab10 (avoids deprecated get_cmap); sample evenly for n classes
+    cmap = plt.cm.tab10
+    colors = cmap(np.linspace(0, 1, max(1, len(classes))))
     
     fig, axes = plt.subplots(1, 2, figsize=figsize)
     

@@ -32,26 +32,37 @@ pip install -e .
 ## Quick Start
 
 ```python
-from sublimex import SublimeX
+import sublimex
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
 
 # Your data: list of arrays/DataFrames, one per channel
 # Each array has shape (n_samples, n_time_points)
-X_train = [channel1_train, channel2_train]
-X_test = [channel1_test, channel2_test]
+X = [channel1_data, channel2_data, channel3_data]  # 3 channels
+y = labels  # Binary or continuous targets
+
+# Split data (indices then index each channel by them)
+idx_train, idx_test = train_test_split(
+    range(len(y)), test_size=0.2, stratify=y, random_state=42
+)
+X_train = [x.iloc[idx_train] for x in X]
+X_test = [x.iloc[idx_test] for x in X]
+y_train, y_test = y[idx_train], y[idx_test]
 
 # Fit SublimeX
-model = SublimeX(metric='auc', n_trials=100, verbose=True)
-model.fit(X_train, y_train)
-
-# Transform to features
-features_train = model.transform(X_train)
-features_test = model.transform(X_test)
+model = sublimex.SublimeX(metric='auc', n_trials=100, verbose=True)
+train_features = model.fit_transform(X_train, y_train)
+test_features = model.transform(X_test)
 
 # Use with any classifier
-from sklearn.ensemble import RandomForestClassifier
 clf = RandomForestClassifier()
-clf.fit(features_train, y_train)
-predictions = clf.predict(features_test)
+clf.fit(train_features, y_train)
+predictions = clf.predict(test_features)
+
+# Interpret discovered features
+for desc in model.get_feature_descriptions():
+    print(desc)
 ```
 
 ## How It Works
@@ -74,11 +85,15 @@ Each discovered feature is fully interpretable:
 ### Basic Parameters
 
 ```python
-model = SublimeX(
+import sublimex
+
+model = sublimex.SublimeX(
     metric='auc',          # 'auc', 'accuracy', or 'rmse'
     n_trials=300,          # Optimization trials per feature
+    max_features=None,     # Cap number of features (None = stop when no improvement)
     inner_cv=1,            # Internal CV folds (1 = single split)
     val_size=0.5,          # Validation size when inner_cv=1
+    random_state=42,       # Reproducibility (CV + Optuna)
     verbose=True,          # Print progress
 )
 ```
@@ -86,17 +101,17 @@ model = SublimeX(
 ### Custom Transforms
 
 ```python
-from sublimex import register_transform
+import sublimex
 
 # Register a custom transform
 def hilbert_envelope(data):
     from scipy.signal import hilbert
     return np.abs(hilbert(data, axis=-1))
 
-register_transform('hilbert', hilbert_envelope)
+sublimex.register_transform('hilbert', hilbert_envelope)
 
 # Use specific transforms
-model = SublimeX(
+model = sublimex.SublimeX(
     transforms={
         'raw': lambda x: x,
         'hilbert': hilbert_envelope,
@@ -107,27 +122,40 @@ model = SublimeX(
 ### Custom Objective Functions
 
 ```python
-from sublimex import create_custom_objective
+import sublimex
+import numpy as np
 
 # Create objective with custom aggregation
 def rms(segment):
     """Root mean square."""
     return np.sqrt((segment ** 2).mean(axis=1, keepdims=True))
 
-rms_objective = create_custom_objective(rms, 'rms')
-model = SublimeX(objective_fn=rms_objective)
+rms_objective = sublimex.create_custom_objective(rms, 'rms')
+model = sublimex.SublimeX(objective_fn=rms_objective)
 ```
 
 ### Custom ML Models
 
 ```python
-from sublimex import SklearnModelWrapper
+import sublimex
 from sklearn.ensemble import RandomForestClassifier
 
 # Wrap any sklearn estimator
 rf = RandomForestClassifier(n_estimators=100)
-model = SublimeX(model=SklearnModelWrapper(rf))
+model = sublimex.SublimeX(model=sublimex.SklearnModelWrapper(rf))
 ```
+
+## Extending SublimeX
+
+SublimeX is designed so you can plug in your own components without forking the repo.
+
+| Component | How to extend |
+|-----------|----------------|
+| **Transforms** | `sublimex.register_transform('name', callable)` or pass `transforms={'name': fn}`. Each transform receives shape `(..., n_time)` and returns the same shape. |
+| **Objectives** | Implement `(trial, ctx) -> float`: use `trial.suggest_*` for segment/params, read `ctx['transformed']`, `ctx['n_channels']`, `ctx['n_time']`, etc., set `ctx['last_feature']` when `ctx['extract_only']` is True, else return mean CV score. See `sublimex.objectives` module docstring for full `ctx` fields. |
+| **Models** | Any object with `evaluate(X_train, y_train, X_val, y_val, metric) -> float` and `test(X_train, y_train, X_test, y_test, metric) -> float`. Optionally `predict(X)` / `predict_proba(X)` after fitting. See `sublimex.models` module docstring. |
+
+For ablation or fixed-size feature sets, set `max_features=N` so discovery stops after N features even if the metric could still improve.
 
 ## Built-in Options
 
@@ -162,57 +190,121 @@ model = SublimeX(model=SklearnModelWrapper(rf))
 ## Visualization
 
 ```python
-from sublimex.visualization import (
-    plot_feature_distributions,
-    plot_segment_on_signal,
-    plot_transform_comparison,
-)
+import sublimex
+import matplotlib.pyplot as plt
 
 # Compare feature values across classes
-fig = plot_feature_distributions(features, y, feature_idx=0)
+fig = sublimex.plot_feature_distributions(features, y, feature_idx=0)
+plt.show()
 
 # Show where a feature's segment falls on the signal
-fig = plot_segment_on_signal(signal, model.extracted_features[0], model.n_time)
+fig = sublimex.plot_segment_on_signal(
+    signal, model.extracted_features[0], model.n_time
+)
+plt.show()
 
 # Compare all transforms for a sample
-fig = plot_transform_comparison(signal, TRANSFORMS)
+fig = sublimex.plot_transform_comparison(signal, sublimex.TRANSFORMS)
+plt.show()
 ```
 
 ## Saving and Loading
 
 ```python
+import sublimex
+
 # Save discovered features
 model.save_features('features.json')
 
 # Load and reuse
-new_model = SublimeX()
+new_model = sublimex.SublimeX()
 new_model.load_features('features.json')
-new_model.n_time = 200  # Set from original data
-new_model.n_channels = 5
 features = new_model.transform(X_new)
 ```
 
-## Example: Gene Expression Prediction
+## Benchmark: MIMIC processed dataset
+
+To run SublimeX on the MIMIC processed time series (e.g. from the manuscript pipeline):
+
+1. Place the processed parquet at `examples/mimic_processed.parquet` (or set `MIMIC_PARQUET` to its path).
+2. The parquet should have one row per sample, a target column (`outcome`, `label`, or `y`), and remaining columns as the time series (see script docstring for single- vs multi-channel layout).
+3. Run:
+
+```bash
+python examples/run_benchmark_dataset.py
+```
+
+Optional env: `TEST_SIZE` (default 0.2), `RANDOM_STATE` (default 42).
+
+## Complete Example: Synthetic Multi-Channel Time Series
 
 ```python
-"""Predict gene expression from histone modifications (REMC dataset)."""
-from sublimex import SublimeX
+"""Complete example with synthetic data."""
+import sublimex
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+import lightgbm as lgb
 
-# Load histone mark signals (5 marks × 200 bins around TSS)
-X = [h3k4me3_df, h3k4me1_df, h3k36me3_df, h3k9me3_df, h3k27me3_df]
-y = expression_labels  # 0 = low, 1 = high
+# Generate synthetic multi-channel time series
+np.random.seed(42)
+n_samples, n_channels, n_bins = 500, 5, 200
 
-# Discover features
-model = SublimeX(metric='auc', n_trials=100, verbose=True)
-model.fit(X, y)
+X = []
+y = np.random.randint(0, 2, n_samples)
 
-# Interpret
+for channel in range(n_channels):
+    channel_data = []
+    for i in range(n_samples):
+        t = np.linspace(0, 4 * np.pi, n_bins)
+        if y[i] == 1:
+            # Class 1: Higher amplitude with distinctive peak
+            signal = 2.0 * np.sin(t) + 1.5 * np.sin(2 * t)
+            peak = n_bins // 2
+            signal[peak-20:peak+20] += 1.5 * np.exp(-((np.arange(40) - 20) ** 2) / 50)
+        else:
+            # Class 0: Lower amplitude, more noise
+            signal = 1.0 * np.sin(t) + 0.5 * np.sin(3 * t)
+        signal += np.random.normal(0, 0.3, n_bins)
+        channel_data.append(signal)
+    
+    X.append(pd.DataFrame(channel_data, columns=[f'bin_{j}' for j in range(n_bins)]))
+
+# Split data
+idx_train, idx_test = train_test_split(
+    range(len(y)), test_size=0.2, stratify=y, random_state=42
+)
+X_train = [x.iloc[idx_train].astype(np.float32) for x in X]
+X_test = [x.iloc[idx_test].astype(np.float32) for x in X]
+y_train, y_test = y[idx_train], y[idx_test]
+
+# Discover features with SublimeX
+model = sublimex.SublimeX(metric='auc', n_trials=50, verbose=True)
+train_features = model.fit_transform(X_train, y_train)
+test_features = model.transform(X_test)
+
+print(f"Discovered {train_features.shape[1]} features")
+
+# Train classifier
+clf = lgb.LGBMClassifier(n_estimators=100, verbose=-1)
+clf.fit(train_features, y_train)
+auc = roc_auc_score(y_test, clf.predict_proba(test_features)[:, 1])
+print(f"Test AUC: {auc:.4f}")
+
+# Interpret features
+print("\nDiscovered Features:")
 for desc in model.get_feature_descriptions():
-    print(desc)
-# Output:
-# Feature 1: mean of raw in channel 0, positions 90-110
-# Feature 2: mean of derivative in channel 2, positions 100-180
-# ...
+    print(f"  {desc}")
+
+# Visualize
+import matplotlib.pyplot as plt
+
+fig = sublimex.plot_feature_importance(
+    clf.feature_importances_, 
+    model.get_feature_descriptions()
+)
+plt.show()
 ```
 
 ## Comparison with Other Methods
