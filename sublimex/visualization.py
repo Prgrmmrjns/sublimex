@@ -1,4 +1,4 @@
-"""Minimal viz: feature importance bar, segment on signal."""
+"""Visualize segment on signal."""
 import numpy as np
 import matplotlib.pyplot as plt
 

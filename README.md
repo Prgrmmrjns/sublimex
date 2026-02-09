@@ -17,7 +17,9 @@ SublimeX is an interpretable feature extraction framework for time series and sp
 
 ## Flowchart of SublimeX pipeline
 
-![SublimeX Flowchart](flowchart.png)
+<p align="center">
+  <img src="flowchart.png" alt="SublimeX pipeline flowchart" width="800"/>
+</p>
 
 ## Installation
 
@@ -54,7 +56,7 @@ X_train = [x.iloc[idx_train] for x in X]
 X_test = [x.iloc[idx_test] for x in X]
 y_train, y_test = y[idx_train], y[idx_test]
 
-# Fit SublimeX
+# Fit SublimeX (default: mean over segment per feature)
 model = sublimex.SublimeX(metric='auc', n_trials=100, verbose=True)
 train_features = model.fit_transform(X_train, y_train)
 test_features = model.transform(X_test)
@@ -63,10 +65,6 @@ test_features = model.transform(X_test)
 clf = RandomForestClassifier()
 clf.fit(train_features, y_train)
 predictions = clf.predict(test_features)
-
-# Interpret: each feature = mean over (channel, transform, segment)
-for desc in model.get_feature_descriptions():
-    print(desc)
 ```
 
 ## How It Works
@@ -141,10 +139,6 @@ Default objective is **mean over segment** (one statistic per feature). Custom o
 ```python
 import sublimex
 import matplotlib.pyplot as plt
-
-# Feature importance (use with your classifier's importances)
-fig = sublimex.plot_feature_importance(importances, labels=model.get_feature_descriptions())
-plt.show()
 
 # Where the first feature's segment falls on the signal
 fig = sublimex.plot_segment_on_signal(data[0], model.extracted_features[0], model.n_time)
@@ -222,20 +216,6 @@ clf.fit(train_features, y_train)
 auc = roc_auc_score(y_test, clf.predict_proba(test_features)[:, 1])
 print(f"Test AUC: {auc:.4f}")
 
-# Interpret features
-print("\nDiscovered Features:")
-for desc in model.get_feature_descriptions():
-    print(f"  {desc}")
-
-# Visualize
-import matplotlib.pyplot as plt
-
-fig = sublimex.plot_feature_importance(
-    clf.feature_importances_, 
-    model.get_feature_descriptions()
-)
-plt.show()
-```
 
 ## Citation
 
@@ -248,7 +228,6 @@ If you use SublimeX in your research, please cite:
   year={2026},
   url={https://github.com/Prgrmmrjns/SublimeX}
 }
-```
 
 
 ## Contributing

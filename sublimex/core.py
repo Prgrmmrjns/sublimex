@@ -15,7 +15,7 @@ import optuna
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 
 from sublimex.transforms import TRANSFORMS
-from sublimex.objectives import default_objective
+from sublimex.objectives import mean_objective
 from sublimex.models import LightGBMModel
 
 warnings.filterwarnings('ignore', category=optuna.exceptions.ExperimentalWarning)
@@ -53,7 +53,7 @@ class SublimeX:
         self.verbose = verbose
         self.show_progress_bar = show_progress_bar
         self.transforms = transforms or TRANSFORMS
-        self.objective_fn = objective_fn or default_objective
+        self.objective_fn = objective_fn or mean_objective
         self.model = model
         self.extracted_features: List[Dict[str, Any]] = []
         self.transform_names: List[str] = list(self.transforms.keys())
