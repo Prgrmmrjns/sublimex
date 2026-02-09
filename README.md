@@ -15,6 +15,10 @@ SublimeX is an interpretable feature extraction framework for time series and sp
 - **Competitive performance**: Matches deep learning on many tasks
 - **Modular design**: Custom transforms, objectives, and ML models
 
+## Flowchart of SublimeX pipeline
+
+![SublimeX Flowchart](flowchart.png)
+
 ## Installation
 
 ```bash
@@ -60,7 +64,7 @@ clf = RandomForestClassifier()
 clf.fit(train_features, y_train)
 predictions = clf.predict(test_features)
 
-# Interpret discovered features
+# Interpret: each feature = mean over (channel, transform, segment)
 for desc in model.get_feature_descriptions():
     print(desc)
 ```
@@ -103,46 +107,8 @@ model = sublimex.SublimeX(
 ```python
 import sublimex
 
-# Register a custom transform
-def hilbert_envelope(data):
-    from scipy.signal import hilbert
-    return np.abs(hilbert(data, axis=-1))
-
-sublimex.register_transform('hilbert', hilbert_envelope)
-
-# Use specific transforms
-model = sublimex.SublimeX(
-    transforms={
-        'raw': lambda x: x,
-        'hilbert': hilbert_envelope,
-    }
-)
-```
-
-### Custom Objective Functions
-
-```python
-import sublimex
-import numpy as np
-
-# Create objective with custom aggregation
-def rms(segment):
-    """Root mean square."""
-    return np.sqrt((segment ** 2).mean(axis=1, keepdims=True))
-
-rms_objective = sublimex.create_custom_objective(rms, 'rms')
-model = sublimex.SublimeX(objective_fn=rms_objective)
-```
-
-### Custom ML Models
-
-```python
-import sublimex
-from sklearn.ensemble import RandomForestClassifier
-
-# Wrap any sklearn estimator
-rf = RandomForestClassifier(n_estimators=100)
-model = sublimex.SublimeX(model=sublimex.SklearnModelWrapper(rf))
+# Pass custom transforms dict
+model = sublimex.SublimeX(transforms={'raw': lambda d: d.astype(np.float32), 'zscore': your_fn})
 ```
 
 ## Extending SublimeX
@@ -151,7 +117,7 @@ SublimeX is designed so you can plug in your own components without forking the 
 
 | Component | How to extend |
 |-----------|----------------|
-| **Transforms** | `sublimex.register_transform('name', callable)` or pass `transforms={'name': fn}`. Each transform receives shape `(..., n_time)` and returns the same shape. |
+| **Transforms** | Pass `transforms={'name': fn}`. Each fn receives shape `(..., n_time)` and returns same shape. |
 | **Objectives** | Implement `(trial, ctx) -> float`: use `trial.suggest_*` for segment/params, read `ctx['transformed']`, `ctx['n_channels']`, `ctx['n_time']`, etc., set `ctx['last_feature']` when `ctx['extract_only']` is True, else return mean CV score. See `sublimex.objectives` module docstring for full `ctx` fields. |
 | **Models** | Any object with `evaluate(X_train, y_train, X_val, y_val, metric) -> float` and `test(X_train, y_train, X_test, y_test, metric) -> float`. Optionally `predict(X)` / `predict_proba(X)` after fitting. See `sublimex.models` module docstring. |
 
@@ -168,24 +134,7 @@ For ablation or fixed-size feature sets, set `max_features=N` so discovery stops
 | `derivative` | First-order gradient | Rate of change, transitions |
 | `fft_power` | FFT power spectrum | Frequency content, periodicity |
 
-### Aggregations (for `aggregate_objective`)
-
-| Aggregation | Description |
-|-------------|-------------|
-| `mean` | Average value (default) |
-| `min`, `max` | Extreme values |
-| `range` | max - min |
-| `std` | Standard deviation |
-| `median` | Robust central tendency |
-| `argmin`, `argmax` | Position of extrema |
-
-### Objectives
-
-| Objective | Description |
-|-----------|-------------|
-| `mean_objective` | Mean over segment (default, most interpretable) |
-| `aggregate_objective` | Choose from 8 aggregations |
-| `pattern_objective` | B-spline pattern matching |
+Default objective is **mean over segment** (one statistic per feature). Custom objectives: pass `objective_fn=(trial, ctx) -> float`.
 
 ## Visualization
 
@@ -193,18 +142,12 @@ For ablation or fixed-size feature sets, set `max_features=N` so discovery stops
 import sublimex
 import matplotlib.pyplot as plt
 
-# Compare feature values across classes
-fig = sublimex.plot_feature_distributions(features, y, feature_idx=0)
+# Feature importance (use with your classifier's importances)
+fig = sublimex.plot_feature_importance(importances, labels=model.get_feature_descriptions())
 plt.show()
 
-# Show where a feature's segment falls on the signal
-fig = sublimex.plot_segment_on_signal(
-    signal, model.extracted_features[0], model.n_time
-)
-plt.show()
-
-# Compare all transforms for a sample
-fig = sublimex.plot_transform_comparison(signal, sublimex.TRANSFORMS)
+# Where the first feature's segment falls on the signal
+fig = sublimex.plot_segment_on_signal(data[0], model.extracted_features[0], model.n_time)
 plt.show()
 ```
 
@@ -222,19 +165,6 @@ new_model.load_features('features.json')
 features = new_model.transform(X_new)
 ```
 
-## Benchmark: MIMIC processed dataset
-
-To run SublimeX on the MIMIC processed time series (e.g. from the manuscript pipeline):
-
-1. Place the processed parquet at `examples/mimic_processed.parquet` (or set `MIMIC_PARQUET` to its path).
-2. The parquet should have one row per sample, a target column (`outcome`, `label`, or `y`), and remaining columns as the time series (see script docstring for single- vs multi-channel layout).
-3. Run:
-
-```bash
-python examples/run_benchmark_dataset.py
-```
-
-Optional env: `TEST_SIZE` (default 0.2), `RANDOM_STATE` (default 42).
 
 ## Complete Example: Synthetic Multi-Channel Time Series
 
@@ -307,32 +237,19 @@ fig = sublimex.plot_feature_importance(
 plt.show()
 ```
 
-## Comparison with Other Methods
-
-| Method | Features | Interpretability | Optimization |
-|--------|----------|------------------|--------------|
-| **SublimeX** | 5-15 | High (explicit segments) | Bayesian |
-| tsfresh | 100-800 | Medium (statistical) | Filter |
-| catch22 | 22 | Medium (fixed set) | None |
-| MiniRocket | ~10,000 | Low | Deterministic |
-| RDST | 2k-10k | Medium (shapelets) | Random |
-
 ## Citation
 
 If you use SublimeX in your research, please cite:
 
 ```bibtex
 @software{sublimex2025,
-  title={SublimeX: Supervised Bottom-Up Localized Multi-Representative Feature eXtraction},
+  title={Supervised Bottom-Up Localized Multi-Representative Feature eXtraction},
   author={Wolber, J.C.},
   year={2026},
   url={https://github.com/Prgrmmrjns/SublimeX}
 }
 ```
 
-## License
-
-MIT License - see [LICENSE](LICENSE) for details.
 
 ## Contributing
 

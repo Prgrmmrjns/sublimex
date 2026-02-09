@@ -1,19 +1,15 @@
-"""SublimeX core module - interpretable feature extraction.
+"""SublimeX: interpretable feature extraction from multi-channel time series.
 
-Algorithm (high level):
-  1. Stack input channels into array (n_samples, n_channels, n_time).
-  2. Apply each registered transform to get multiple views (e.g. raw, zscore, fft_power).
-  3. Repeat until no improvement (or max_features reached):
-     a. Run Bayesian optimization (Optuna) to choose segment (channel, transform, center, range)
-        and optional aggregation so that a single new feature improves validation metric.
-     b. Append the new feature to the current feature matrix and record its parameters.
-  4. transform() applies the same segment+aggregation for each saved feature to new data.
+1. Stack channels -> (n_samples, n_channels, n_time).
+2. Apply transforms to get views (raw, zscore, fft_power, ...).
+3. Until no improvement: Optuna picks (channel, transform, center, range); extract mean over segment; add feature if validation metric improves.
+4. transform() applies saved segment/mean to new data.
 """
-import numpy as np
 import json
 import os
+import numpy as np
 import warnings
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional
 
 import optuna
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
@@ -26,62 +22,28 @@ warnings.filterwarnings('ignore', category=optuna.exceptions.ExperimentalWarning
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
-class MockTrial:
-    """Mock Optuna trial for replaying saved parameters."""
+class _MockTrial:
     __slots__ = ('params',)
-    
+
     def __init__(self, params):
         self.params = params
-    
+
     def suggest_int(self, name, low, high):
         return int(self.params[name])
-    
+
     def suggest_float(self, name, low, high):
         return float(self.params[name])
-    
+
     def suggest_categorical(self, name, choices):
         return self.params[name]
 
 
 class SublimeX:
-    """Supervised Bottom-Up Localized Multi-Representative Feature eXtraction.
-
-    Discovers a minimal set of interpretable features from multi-channel time series
-    by optimizing segment (channel, transform, time window) and aggregation for each
-    feature so that downstream metric (e.g. AUC) improves.
-
-    Parameters
-    ----------
-    metric : str
-        Downstream metric to optimize: 'auc', 'accuracy', or 'rmse'.
-    n_trials : int
-        Number of Optuna trials per feature (higher = better search, slower).
-    max_features : int or None
-        Maximum number of features to discover. None = stop only when no improvement.
-    inner_cv : int
-        Internal CV folds for evaluating a candidate feature (1 = single train/val split).
-    val_size : float
-        Validation fraction when inner_cv=1 (e.g. 0.5 = 50% validation).
-    random_state : int or None
-        Seed for CV splits and Optuna. None = non-reproducible.
-    verbose : bool
-        Print progress (e.g. each discovered feature).
-    show_progress_bar : bool
-        Show Optuna progress bar per feature.
-    transforms : dict or None
-        Map transform_name -> callable(shape (..., n_time)) -> same shape. None = use built-in.
-    objective_fn : callable or None
-        (trial, ctx) -> float. None = default mean-over-segment objective.
-    model : object or None
-        Must implement evaluate(X_train, y_train, X_val, y_val, metric) -> float and
-        test(...). None = LightGBM classifier/regressor.
-    sampler : str
-        Optuna sampler: 'tpe' or 'nsga2'.
-    """
+    """Optimize segment (channel, transform, time window) and mean aggregation per feature; metric improves on validation."""
 
     def __init__(self, metric='auc', n_trials=300, max_features=None, inner_cv=1, val_size=0.5,
                  random_state=None, verbose=False, show_progress_bar=False, transforms=None,
-                 objective_fn=None, model=None, sampler='tpe'):
+                 objective_fn=None, model=None):
         self.metric = metric
         self.n_trials = n_trials
         self.max_features = max_features
@@ -93,223 +55,86 @@ class SublimeX:
         self.transforms = transforms or TRANSFORMS
         self.objective_fn = objective_fn or default_objective
         self.model = model
-        self.sampler = sampler
-
         self.extracted_features: List[Dict[str, Any]] = []
         self.transform_names: List[str] = list(self.transforms.keys())
         self.n_channels: Optional[int] = None
         self.n_time: Optional[int] = None
-        self._is_fitted: bool = False
-    
+        self._is_fitted = False
+
     def _apply_transforms(self, data):
-        """Apply all transforms to input data."""
         n_samples, n_channels, n_time = data.shape
         out = np.empty((len(self.transform_names), n_samples, n_channels, n_time), dtype=np.float32)
         for ti, tname in enumerate(self.transform_names):
             flat = data.reshape(-1, n_time)
             out[ti] = self.transforms[tname](flat).reshape(n_samples, n_channels, n_time)
         return out
-    
-    def _extract_feature(self, params, ctx):
-        """Extract a single feature using saved parameters."""
+
+    def _extract_one(self, params, ctx):
         ctx['extract_only'] = True
-        self.objective_fn(MockTrial(params), ctx)
+        self.objective_fn(_MockTrial(params), ctx)
         ctx['extract_only'] = False
         return ctx['last_feature']
-    
-    def _create_cv_splits(self, n_samples, y):
-        """Create CV splits for internal evaluation."""
-        rng = self.random_state
+
+    def _cv_splits(self, n_samples, y):
         if self.inner_cv == 1:
             stratify = y if self.metric != 'rmse' else None
-            train_idx, val_idx = train_test_split(
-                np.arange(n_samples), test_size=self.val_size,
-                random_state=rng, stratify=stratify)
-            return [(train_idx, val_idx)]
-        cv_cls = StratifiedKFold if self.metric != 'rmse' else KFold
-        return list(cv_cls(self.inner_cv, shuffle=True, random_state=rng).split(np.zeros(n_samples), y))
-    
-    def _create_sampler(self):
-        """Create Optuna sampler."""
-        if self.sampler == 'nsga2':
-            return optuna.samplers.NSGAIISampler(seed=self.random_state)
-        return optuna.samplers.TPESampler(
-            seed=self.random_state, multivariate=True, group=True, constant_liar=True
-        )
-    
-    def fit(self, input_series, y, initial_X=None):
-        """Fit the feature extractor to training data.
+            tr, va = train_test_split(np.arange(n_samples), test_size=self.val_size, random_state=self.random_state, stratify=stratify)
+            return [(tr, va)]
+        cls = StratifiedKFold if self.metric != 'rmse' else KFold
+        return list(cls(self.inner_cv, shuffle=True, random_state=self.random_state).split(np.zeros(n_samples), y))
 
-        Parameters
-        ----------
-        input_series : list of array-like
-            One array per channel, each (n_samples, n_time).
-        y : array-like
-            Target values.
-        initial_X : array-like or None
-            If provided, shape (n_samples, n_initial). These features are always
-            included when evaluating each candidate (so the first SublimeX feature
-            is scored together with initial_X, not alone). Use for static/baseline
-            features that should be part of the downstream model.
-        """
+    def fit(self, input_series, y, initial_X=None):
         data = np.stack(list(input_series), axis=1).astype(np.float32)
         n_samples, self.n_channels, self.n_time = data.shape
-
         if self.verbose:
-            print(f"\nSublimeX Feature Extraction")
-            print(f"  Samples: {n_samples}")
-            print(f"  Channels: {self.n_channels}")
-            print(f"  Time points: {self.n_time}")
-            print(f"  Transforms: {self.transform_names}")
-            print(f"  Metric: {self.metric}\n")
-
+            print(f"SublimeX: {n_samples} samples, {self.n_channels} ch, {self.n_time} time, metric={self.metric}")
         if self.model is None:
-            task = 'regression' if self.metric == 'rmse' else 'classification'
-            self.model = LightGBMModel(task=task)
-
-        cv_splits = self._create_cv_splits(n_samples, y)
+            self.model = LightGBMModel(task='regression' if self.metric == 'rmse' else 'classification')
+        cv_splits = self._cv_splits(n_samples, y)
         transformed = self._apply_transforms(data)
-
         direction = 'minimize' if self.metric == 'rmse' else 'maximize'
-        is_maximize = direction == 'maximize'
-
-        ctx = {
-            'transformed': transformed, 'y': y, 'model': self.model,
-            'metric': self.metric, 'n_channels': self.n_channels,
-            'n_time': self.n_time, 'transform_names': self.transform_names,
-            'cv_splits': cv_splits,
-        }
-
+        is_max = direction == 'maximize'
+        ctx = {'transformed': transformed, 'y': y, 'model': self.model, 'metric': self.metric,
+               'n_channels': self.n_channels, 'n_time': self.n_time, 'transform_names': self.transform_names, 'cv_splits': cv_splits}
         self.extracted_features = []
-        if initial_X is not None:
-            initial_X = np.asarray(initial_X, dtype=np.float32)
-            if initial_X.ndim == 1:
-                initial_X = initial_X.reshape(-1, 1)
-            current_X = initial_X.copy()
-        else:
-            current_X = np.empty((n_samples, 0), dtype=np.float32)
-        best_score = float('inf') if not is_maximize else -float('inf')
+        current_X = np.asarray(initial_X, dtype=np.float32).reshape(n_samples, -1) if initial_X is not None else np.empty((n_samples, 0), dtype=np.float32)
+        best = -np.inf if is_max else np.inf
         while True:
             if self.max_features is not None and len(self.extracted_features) >= self.max_features:
-                if self.verbose:
-                    print(f"  Reached max_features={self.max_features}")
                 break
             ctx['current_X'] = current_X
-
-            study = optuna.create_study(direction=direction, sampler=self._create_sampler())
-            study.optimize(
-                lambda t: self.objective_fn(t, ctx),
-                n_trials=self.n_trials,
-                show_progress_bar=self.show_progress_bar,
-                n_jobs=-1,
-            )
-
-            improved = (is_maximize and study.best_value > best_score) or (
-                not is_maximize and study.best_value < best_score
-            )
-
+            study = optuna.create_study(direction=direction)
+            study.optimize(lambda t: self.objective_fn(t, ctx), n_trials=self.n_trials, show_progress_bar=self.show_progress_bar, n_jobs=-1)
+            improved = (is_max and study.best_value > best) or (not is_max and study.best_value < best)
             if not improved:
                 break
-
-            best_score = study.best_value
+            best = study.best_value
             params = study.best_params
             self.extracted_features.append(params)
-
-            feat = self._extract_feature(params, ctx)
+            feat = self._extract_one(params, ctx)
             current_X = np.hstack([current_X, feat]) if current_X.size else feat
-
             if self.verbose:
-                print(f"  Feature {len(self.extracted_features)}: {self.metric}={best_score:.5f}, params={params}")
-
+                print(f"  Feature {len(self.extracted_features)}: {self.metric}={best:.5f}")
         self._is_fitted = True
-        if self.verbose:
-            print(f"\nDiscovered {len(self.extracted_features)} features")
         return self
-    
-    def transform(self, input_series, initial_X=None):
-        """Transform data using extracted features.
 
-        Parameters
-        ----------
-        input_series : list of array-like
-            One array per channel, each (n_samples, n_time).
-        initial_X : array-like or None
-            If provided, shape (n_samples, n_initial). Prepended to the SublimeX
-            features so that output is [initial_X | SublimeX features]. Pass the
-            same kind of initial features used in fit() for the corresponding samples.
-        """
+    def transform(self, input_series, initial_X=None):
         data = np.stack(list(input_series), axis=1).astype(np.float32)
         n_samples, n_channels, n_time = data.shape
         transformed = self._apply_transforms(data)
-
-        ctx = {'transformed': transformed, 'n_time': n_time,
-               'n_channels': n_channels, 'transform_names': self.transform_names}
-
-        features = [self._extract_feature(p, ctx) for p in self.extracted_features]
-        sx = np.hstack(features).astype(np.float32)
+        ctx = {'transformed': transformed, 'n_time': n_time, 'n_channels': n_channels, 'transform_names': self.transform_names}
+        feats = [self._extract_one(p, ctx) for p in self.extracted_features]
+        out = np.hstack(feats).astype(np.float32)
         if initial_X is not None:
-            initial_X = np.asarray(initial_X, dtype=np.float32)
-            if initial_X.ndim == 1:
-                initial_X = initial_X.reshape(-1, 1)
-            return np.hstack([initial_X, sx])
-        return sx
+            initial_X = np.asarray(initial_X, dtype=np.float32).reshape(n_samples, -1)
+            return np.hstack([initial_X, out])
+        return out
 
     def fit_transform(self, input_series, y, initial_X=None):
-        """Fit and transform in one step."""
         return self.fit(input_series, y, initial_X=initial_X).transform(input_series, initial_X=initial_X)
-    
+
     def save_features(self, path):
-        """Save extracted feature parameters to JSON file."""
         os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-        features_list = []
-        for i, params in enumerate(self.extracted_features):
-            feature_dict = {'feature_id': i + 1}
-            for k, v in params.items():
-                if isinstance(v, (np.integer, int)):
-                    feature_dict[k] = int(v)
-                elif isinstance(v, (np.floating, float)):
-                    feature_dict[k] = float(v)
-                else:
-                    feature_dict[k] = v
-            features_list.append(feature_dict)
+        out = [{k: (int(v) if isinstance(v, (np.integer, int)) else float(v) if isinstance(v, (np.floating, float)) else v) for k, v in p.items()} for p in self.extracted_features]
         with open(path, 'w') as f:
-            json.dump(features_list, f, indent=2)
-    
-    def load_features(self, path):
-        """Load feature parameters from JSON file."""
-        with open(path, 'r') as f:
-            features_list = json.load(f)
-        self.extracted_features = [{k: v for k, v in f.items() if k != 'feature_id'} 
-                                   for f in features_list]
-        self._is_fitted = True
-        return self
-    
-    def get_feature_descriptions(self):
-        """Get human-readable descriptions of extracted features."""
-        if not self.extracted_features:
-            return []
-        
-        descriptions = []
-        for i, params in enumerate(self.extracted_features):
-            t_idx = params.get('t', 0)
-            transform = self.transform_names[t_idx] if t_idx < len(self.transform_names) else f"transform_{t_idx}"
-            ch = params.get('ch', 0)
-            c, r = params.get('c', 0.5), params.get('r', 0.5)
-            
-            if self.n_time:
-                start = int(c * self.n_time - r * self.n_time / 2)
-                end = int(c * self.n_time + r * self.n_time / 2)
-                pos_str = f"positions {max(0, start)}-{min(self.n_time, end)}"
-            else:
-                pos_str = f"center={c:.2f}, range={r:.2f}"
-            
-            feat_type = params.get('feature_type', 'mean')
-            descriptions.append(f"Feature {i+1}: {feat_type} of {transform} in channel {ch}, {pos_str}")
-        return descriptions
-    
-    def __repr__(self):
-        status = "fitted" if self._is_fitted else "not fitted"
-        return (
-            f"SublimeX(metric='{self.metric}', n_trials={self.n_trials}, "
-            f"status={status}, n_features={len(self.extracted_features)})"
-        )
+            json.dump(out, f, indent=2)
