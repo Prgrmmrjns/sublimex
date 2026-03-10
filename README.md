@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="sublimex_icon.png" alt="SublimeX" width="280"/>
+</p>
+
 # SublimeX
 
 **Supervised Bottom-Up Localized Multi-Representative Feature eXtraction**
