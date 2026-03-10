@@ -22,7 +22,7 @@ SublimeX is an interpretable feature extraction framework for time series and sp
 ## Flowchart of SublimeX pipeline
 
 <p align="center">
-  <img src="flowchart.png" alt="SublimeX pipeline flowchart" width="800"/>
+  <img src="graphical_abstract.png" alt="SublimeX pipeline flowchart" width="800"/>
 </p>
 
 ## Installation
@@ -61,7 +61,8 @@ X_test = [x.iloc[idx_test] for x in X]
 y_train, y_test = y[idx_train], y[idx_test]
 
 # Fit SublimeX (default: mean over segment per feature)
-model = sublimex.SublimeX(metric='auc', n_trials=100, verbose=True)
+# Use max_features to get a fixed number of features, or omit to stop when metric stops improving
+model = sublimex.SublimeX(metric='auc', n_trials=100, max_features=5, verbose=True)
 train_features = model.fit_transform(X_train, y_train)
 test_features = model.transform(X_test)
 
