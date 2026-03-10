@@ -1,54 +1,44 @@
-"""Complete example with synthetic data."""
-import sublimex
+"""Synthetic multi-channel time series example: fit and predict with SublimeX."""
+import sublimex as slx
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score
-import lightgbm as lgb
+from sklearn.metrics import accuracy_score
 
-# Generate synthetic multi-channel time series
+# --- Synthetic data: multi-channel time series with discriminative segment, high noise ---
 np.random.seed(42)
-n_samples, n_channels, n_bins = 500, 5, 200
+n_samples, n_ch, n_time = 400, 5, 100
+t = np.linspace(0, 4 * np.pi, n_time)
+noise_scale = 1.2   # strong noise
+signal_scale = 0.9  # weak discriminative bump (harder to find)
 
-X = []
+# Class 0: baseline + noise. Class 1: small bump in middle of channel 0 (discriminative).
+X_3d = np.zeros((n_samples, n_ch, n_time), dtype=np.float32)
 y = np.random.randint(0, 2, n_samples)
+for i in range(n_samples):
+    for ch in range(n_ch):
+        X_3d[i, ch, :] = np.sin(t) + noise_scale * np.random.randn(n_time).astype(np.float32)
+    if y[i] == 1:
+        peak = n_time // 2
+        X_3d[i, 0, peak - 12 : peak + 12] += signal_scale  # weak bump in channel 0
 
-for channel in range(n_channels):
-    channel_data = []
-    for i in range(n_samples):
-        t = np.linspace(0, 4 * np.pi, n_bins)
-        if y[i] == 1:
-            # Class 1: Higher amplitude with distinctive peak
-            signal = 2.0 * np.sin(t) + 1.5 * np.sin(2 * t)
-            peak = n_bins // 2
-            signal[peak-20:peak+20] += 1.5 * np.exp(-((np.arange(40) - 20) ** 2) / 50)
-        else:
-            # Class 0: Lower amplitude, more noise
-            signal = 1.0 * np.sin(t) + 0.5 * np.sin(3 * t)
-        signal += np.random.normal(0, 0.3, n_bins)
-        channel_data.append(signal)
-    
-    X.append(pd.DataFrame(channel_data, columns=[f'bin_{j}' for j in range(n_bins)]))
+# --- Train / test split (do this before building the channel list) ---
+train_idx, test_idx = train_test_split(range(n_samples), test_size=0.2, stratify=y, random_state=42)
 
-# Split data
-idx_train, idx_test = train_test_split(
-    range(len(y)), test_size=0.2, stratify=y, random_state=42
-)
-X_train = [x.iloc[idx_train].astype(np.float32) for x in X]
-X_test = [x.iloc[idx_test].astype(np.float32) for x in X]
-y_train, y_test = y[idx_train], y[idx_test]
+# --- Multivariate input: list of DataFrames, one per channel ---
+# SublimeX expects (a) list of DataFrames/arrays, each (n_samples, n_time), or (b) 3D array (n_samples, n_channels, n_time).
+X = [pd.DataFrame(X_3d[:, ch, :]) for ch in range(n_ch)]
+X_train = [x.iloc[train_idx] for x in X]
+X_test = [x.iloc[test_idx] for x in X]
+y_train, y_test = y[train_idx], y[test_idx]
 
-# Discover features with SublimeX
-n_feat = 5
-model = sublimex.SublimeX(metric='auc', n_trials=80, max_features=n_feat, verbose=True)
-train_features = model.fit_transform(X_train, y_train)
-test_features = model.transform(X_test)
+# --- Fit feature extractor (extracts features and fits downstream model) ---
+feature_extractor = slx.FeatureExtractor(metric="accuracy", verbose=True, n_trials=100, max_features=5)
+feat_train = feature_extractor.fit_transform(X_train, y_train)
+feat_test = feature_extractor.transform(X_test)
 
-n = train_features.shape[1]
-print(f"Discovered {n} feature{'s' if n != 1 else ''}")
-
-# Train classifier
-clf = lgb.LGBMClassifier(n_estimators=100, verbose=-1)
-clf.fit(train_features, y_train)
-auc = roc_auc_score(y_test, clf.predict_proba(test_features)[:, 1])
-print(f"Test AUC: {auc:.4f}")
+# --- Predict using the stored model (fitted at end of fit()) ---
+model = feature_extractor.model
+pred = model.predict(feat_test)
+accuracy = accuracy_score(y_test, pred)
+print(f"Extracted {feat_train.shape[1]} features, Test accuracy: {accuracy:.4f}")
