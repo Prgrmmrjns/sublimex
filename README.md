@@ -22,7 +22,7 @@ SublimeX is an interpretable feature extraction framework for time series and sp
 ## Flowchart of SublimeX pipeline
 
 <p align="center">
-  <img src="graphical_abstract.pdf" alt="SublimeX pipeline flowchart" width="800"/>
+  <img src="graphical_abstract.png" alt="SublimeX pipeline flowchart" width="800"/>
 </p>
 
 ## Installation
