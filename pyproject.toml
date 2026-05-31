@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sublimex"
-version = "0.1.1"
+version = "0.1.2"
 description = "SublimeX: Supervised Bottom-Up Localized Multi-Representative Feature eXtraction for time series and spatial data"
 readme = "README.md"
 license = "MIT"
