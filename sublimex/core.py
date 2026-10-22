@@ -73,13 +73,14 @@ def extract_feature(params, ctx):
 
 
 def _get_train_val_split(y, metric):
+    idx = np.arange(len(y))
     stratify = y if metric != 'rmse' else None
-    return train_test_split(np.arange(len(y)), test_size=VAL_SIZE, random_state=RANDOM_STATE, stratify=stratify)
+    return train_test_split(idx, test_size=VAL_SIZE, random_state=RANDOM_STATE, stratify=stratify)
 
 
 def _evaluate(feat, ctx):
     X = np.hstack([ctx['current_X'], feat]) if ctx['current_X'].size else feat
-    tr, va = _get_train_val_split(ctx['y'], ctx['metric'])
+    tr, va = ctx['tr_va'] if 'tr_va' in ctx else _get_train_val_split(ctx['y'], ctx['metric'])
     return ctx['model'].evaluate(X[tr], ctx['y'][tr], X[va], ctx['y'][va], ctx['metric'])
 
 
@@ -115,7 +116,7 @@ def pattern_objective(trial, ctx):
 def decision_tree_objective(trial, ctx):
     feat = extract_feature_from_params(suggest_segment_params(trial, ctx), ctx)
     X = np.hstack([ctx['current_X'], feat]) if ctx['current_X'].size else feat
-    tr, va = _get_train_val_split(ctx['y'], ctx['metric'])
+    tr, va = ctx['tr_va'] if 'tr_va' in ctx else _get_train_val_split(ctx['y'], ctx['metric'])
     Cls = DecisionTreeRegressor if ctx['metric'] == 'rmse' else DecisionTreeClassifier
     m = Cls(max_depth=5, random_state=RANDOM_STATE).fit(X[tr], ctx['y'][tr])
     pred = m.predict(X[va]) if ctx['metric'] == 'rmse' else m.predict_proba(X[va])
@@ -183,10 +184,13 @@ class SublimeX:
         transformed = transformed if transformed is not None else self._apply_transforms(data)
         model = LightGBMModel('regression' if self.metric == 'rmse' else 'classification')
         direction = 'minimize' if self.metric == 'rmse' else 'maximize'
-        ctx = {'transformed': transformed, 'y': y, 'model': model, 'metric': self.metric,
+        y_arr = np.asarray(y)
+        tr_va = _get_train_val_split(y_arr, self.metric)
+        ctx = {'transformed': transformed, 'y': y_arr, 'model': model, 'metric': self.metric,
                'n_channels': self.n_channels, 'n_time': self.n_time,
-               'transform_names': self.transform_names}
+               'transform_names': self.transform_names, 'tr_va': tr_va}
         self.extracted_features = []
+        self._tr_va = tr_va
         self._initial_X = np.asarray(initial_X, dtype=np.float32) if initial_X is not None else None
         current_X = self._initial_X.copy() if self._initial_X is not None else np.empty((n_samples, 0), dtype=np.float32)
         best_score = float('inf') if direction == 'minimize' else -float('inf')
@@ -204,6 +208,7 @@ class SublimeX:
             current_X = np.hstack([current_X, feat]) if current_X.size else feat
             if self.verbose:
                 print(f'    + feature {len(self.extracted_features)}: val={best_score:.6f}', flush=True)
+        self._best_val_score = best_score
         return self
 
     def fit_parallel(self, input_series, y, n_parallel, initial_X=None, transformed=None):
@@ -362,7 +367,7 @@ class FeatureExtractor:
                 break
             ctx['current_X'] = current_X
             study = optuna.create_study(direction=direction)
-            study.optimize(lambda t: self.objective_fn(t, ctx), n_trials=self.n_trials, show_progress_bar=self.show_progress_bar, n_jobs=-1)
+            study.optimize(lambda t: self.objective_fn(t, ctx), n_trials=self.n_trials, show_progress_bar=self.show_progress_bar, n_jobs=1)
             improved = (is_max and study.best_value > best) or (not is_max and study.best_value < best)
             if not improved:
                 break

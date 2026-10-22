@@ -54,9 +54,9 @@ visualization = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Prgrmmrjns/SublimeX"
-Documentation = "https://github.com/Prgrmmrjns/SublimeX#readme"
-Repository = "https://github.com/Prgrmmrjns/SublimeX.git"
+Homepage = "https://github.com/Prgrmmrjns/sublimex"
+Documentation = "https://github.com/Prgrmmrjns/sublimex#readme"
+Repository = "https://github.com/Prgrmmrjns/sublimex.git"
 
 [tool.setuptools]
 packages = ["sublimex"]

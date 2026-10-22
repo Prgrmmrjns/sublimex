@@ -7,7 +7,7 @@
 **Supervised Bottom-Up Localized Multi-Representative Feature eXtraction**
 
 [![PyPI version](https://badge.fury.io/py/sublimex.svg)](https://badge.fury.io/py/sublimex)
-[![Python 3.11+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 SublimeX is an interpretable feature extraction framework for time series and spatial data. It discovers a minimal set of task-specific features through Bayesian optimization, where each feature has explicit, human-readable semantics.
@@ -34,10 +34,12 @@ pip install sublimex
 Or install from source:
 
 ```bash
-git clone https://github.com/Prgrmmrjns/SublimeX.git
-cd SublimeX
+git clone https://github.com/Prgrmmrjns/sublimex.git
+cd sublimex
 pip install -e .
 ```
+
+The manuscript imports `SublimeX`, `mean_objective`, `LightGBMModel`, `TRANSFORMS`, and `extract_feature`. `TRANSFORMS` and `SublimeX` use `raw`, `zscore`, `derivative`, `fft` (absolute FFT). `FeatureExtractor` defaults to `sublimex.transforms` (`fft_power` instead of `fft`).
 
 ## Quick Start
 
@@ -115,7 +117,7 @@ Each parameter and how it fits the method:
 | **`random_state`** | `None` | **Random seed for splits and the optimizer.** Set to an integer (e.g. `42`) for reproducible train/validation splits and Optuna trials. |
 | **`verbose`** | `False` | **Print progress.** If `True`, prints sample/channel/time dimensions and per-feature metric after each round. |
 | **`show_progress_bar`** | `False` | **Show Optuna progress bar.** If `True`, displays a progress bar for the `n_trials` trials in each round. |
-| **`transforms`** | built-in | **Signal transformation library.** Dict of name → callable `(..., n_time) → same shape`. Default: raw, z-score, derivative, FFT power (as in the paper). Custom transforms allow domain-specific views (e.g. wavelets, envelope). |
+| **`transforms`** | built-in | **Signal transformation library.** Dict of name → callable `(..., n_time) → same shape`. `FeatureExtractor` defaults to raw, z-score, derivative, `fft_power`. `SublimeX` defaults to raw, z-score, derivative, `fft`. |
 | **`objective_fn`** | mean | **Objective used by the optimizer.** Signature `(trial, ctx) → float`. Default: mean over the segment (one scalar per sample). The paper notes custom objectives (e.g. median, max) can be plugged in for different aggregations. |
 | **`model`** | LightGBM | **Downstream model used to score candidates.** Must implement `evaluate(X_train, y_train, X_val, y_val, metric)` and `test(...)`. Default is LightGBM (classification or regression by `metric`). The paper uses LightGBM with max depth 5; you can pass any sklearn-compatible model wrapper. |
 
@@ -140,7 +142,8 @@ For ablation or fixed-size feature sets, set `max_features=N` so discovery stops
 | `raw` | Identity (original signal) | Amplitude differences |
 | `zscore` | Z-score normalization | Shape differences |
 | `derivative` | First-order gradient | Rate of change, transitions |
-| `fft_power` | FFT power spectrum | Frequency content, periodicity |
+| `fft` | Absolute FFT (`SublimeX` default) | Frequency content |
+| `fft_power` | Interpolated FFT power (`FeatureExtractor` default) | Frequency content, periodicity |
 
 Default objective is **mean over segment** (one statistic per feature). Custom objectives: pass `objective_fn=(trial, ctx) -> float`.
 

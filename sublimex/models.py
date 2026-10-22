@@ -34,7 +34,7 @@ class LightGBMModel:
         return _score(y_val, pred, metric)
 
     def test(self, X_train, y_train, X_test, y_test, metric, sample_weight=None, deterministic=False):
-        params = {**BASE_PARAMS, 'num_threads': -1}
+        params = {**BASE_PARAMS, 'num_threads': 1}
         if deterministic:
             params['random_state'] = 42
         model = self._cls(**params)
